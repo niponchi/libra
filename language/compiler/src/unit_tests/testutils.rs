@@ -1,17 +1,16 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::util::build_stdlib;
 use bytecode_verifier::{VerifiedModule, VerifiedScript};
 use failure::prelude::*;
 use ir_to_bytecode::{
     compiler::{compile_module, compile_program},
     parser::{parse_module, parse_program},
 };
-use types::account_address::AccountAddress;
+use libra_types::{account_address::AccountAddress, vm_error::VMStatus};
+use stdlib::stdlib_modules;
 use vm::{
     access::ScriptAccess,
-    errors::VerificationError,
     file_format::{CompiledModule, CompiledScript},
 };
 
@@ -35,9 +34,9 @@ macro_rules! instr_count {
 fn compile_script_string_impl(
     code: &str,
     deps: Vec<CompiledModule>,
-) -> Result<(CompiledScript, Vec<VerificationError>)> {
+) -> Result<(CompiledScript, Vec<VMStatus>)> {
     let parsed_program = parse_program(code).unwrap();
-    let compiled_program = compile_program(&AccountAddress::default(), &parsed_program, &deps)?;
+    let compiled_program = compile_program(AccountAddress::default(), parsed_program, &deps)?.0;
 
     let mut serialized_script = Vec::<u8>::new();
     compiled_program.script.serialize(&mut serialized_script)?;
@@ -87,10 +86,10 @@ pub fn compile_script_string_and_assert_error(
 fn compile_module_string_impl(
     code: &str,
     deps: Vec<CompiledModule>,
-) -> Result<(CompiledModule, Vec<VerificationError>)> {
-    let address = &AccountAddress::default();
+) -> Result<(CompiledModule, Vec<VMStatus>)> {
+    let address = AccountAddress::default();
     let module = parse_module(code).unwrap();
-    let compiled_module = compile_module(&address, &module, &deps)?;
+    let compiled_module = compile_module(address, module, &deps)?.0;
 
     let mut serialized_module = Vec::<u8>::new();
     compiled_module.serialize(&mut serialized_module)?;
@@ -153,8 +152,8 @@ pub fn compile_script_string_with_stdlib(code: &str) -> Result<CompiledScript> {
 }
 
 fn stdlib() -> Vec<CompiledModule> {
-    build_stdlib(&AccountAddress::default())
-        .into_iter()
-        .map(|m| m.into_inner())
+    stdlib_modules()
+        .iter()
+        .map(|m| m.clone().into_inner())
         .collect()
 }

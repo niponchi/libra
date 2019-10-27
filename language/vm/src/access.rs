@@ -4,19 +4,24 @@
 //! Defines accessors for compiled modules.
 
 use crate::{
-    errors::VMStaticViolation,
     file_format::{
         AddressPoolIndex, ByteArrayPoolIndex, CompiledModule, CompiledModuleMut, CompiledScript,
         FieldDefinition, FieldDefinitionIndex, FunctionDefinition, FunctionDefinitionIndex,
         FunctionHandle, FunctionHandleIndex, FunctionSignature, FunctionSignatureIndex,
-        LocalsSignature, LocalsSignatureIndex, MemberCount, ModuleHandle, ModuleHandleIndex,
-        StringPoolIndex, StructDefinition, StructDefinitionIndex, StructHandle, StructHandleIndex,
-        TypeSignature, TypeSignatureIndex,
+        IdentifierIndex, LocalsSignature, LocalsSignatureIndex, MemberCount, ModuleHandle,
+        ModuleHandleIndex, StructDefinition, StructDefinitionIndex, StructHandle,
+        StructHandleIndex, TypeSignature, TypeSignatureIndex, UserStringIndex,
     },
     internals::ModuleIndex,
-    IndexKind,
+    vm_string::{VMStr, VMString},
 };
-use types::{account_address::AccountAddress, byte_array::ByteArray, language_storage::ModuleId};
+use libra_types::{
+    account_address::AccountAddress,
+    byte_array::ByteArray,
+    identifier::{IdentStr, Identifier},
+    language_storage::ModuleId,
+    vm_error::{StatusCode, VMStatus},
+};
 
 /// Represents accessors for a compiled module.
 ///
@@ -33,8 +38,8 @@ pub trait ModuleAccess: Sync {
     }
 
     /// Returns the name of the module.
-    fn name(&self) -> &str {
-        self.string_at(self.self_handle().name)
+    fn name(&self) -> &IdentStr {
+        self.identifier_at(self.self_handle().name)
     }
 
     /// Returns the address of the module.
@@ -66,8 +71,12 @@ pub trait ModuleAccess: Sync {
         &self.as_module().as_inner().locals_signatures[idx.into_index()]
     }
 
-    fn string_at(&self, idx: StringPoolIndex) -> &str {
-        self.as_module().as_inner().string_pool[idx.into_index()].as_str()
+    fn identifier_at(&self, idx: IdentifierIndex) -> &IdentStr {
+        &self.as_module().as_inner().identifiers[idx.into_index()]
+    }
+
+    fn user_string_at(&self, idx: UserStringIndex) -> &VMStr {
+        &self.as_module().as_inner().user_strings[idx.into_index()]
     }
 
     fn byte_array_at(&self, idx: ByteArrayPoolIndex) -> &ByteArray {
@@ -88,6 +97,11 @@ pub trait ModuleAccess: Sync {
 
     fn function_def_at(&self, idx: FunctionDefinitionIndex) -> &FunctionDefinition {
         &self.as_module().as_inner().function_defs[idx.into_index()]
+    }
+
+    fn get_field_signature(&self, field_definition_index: FieldDefinitionIndex) -> &TypeSignature {
+        let field_definition = self.field_def_at(field_definition_index);
+        self.type_signature_at(field_definition.signature)
     }
 
     // XXX is a partial range required here?
@@ -123,8 +137,12 @@ pub trait ModuleAccess: Sync {
         &self.as_module().as_inner().address_pool
     }
 
-    fn string_pool(&self) -> &[String] {
-        &self.as_module().as_inner().string_pool
+    fn identifiers(&self) -> &[Identifier] {
+        &self.as_module().as_inner().identifiers
+    }
+
+    fn user_strings(&self) -> &[VMString] {
+        &self.as_module().as_inner().user_strings
     }
 
     fn struct_defs(&self) -> &[StructDefinition] {
@@ -154,8 +172,19 @@ pub trait ModuleAccess: Sync {
     ) -> &[FieldDefinition] {
         let first_field = first_field.0 as usize;
         let field_count = field_count as usize;
+        // Both `first_field` and `field_count` are `u16` before being converted to usize
+        assume!(first_field <= usize::max_value() - field_count);
         let last_field = first_field + field_count;
         &self.as_module().as_inner().field_defs[first_field..last_field]
+    }
+
+    fn is_field_in_struct(
+        &self,
+        field_definition_index: FieldDefinitionIndex,
+        struct_handle_index: StructHandleIndex,
+    ) -> bool {
+        let field_definition = self.field_def_at(field_definition_index);
+        struct_handle_index == field_definition.struct_
     }
 }
 
@@ -190,8 +219,8 @@ pub trait ScriptAccess: Sync {
         &self.as_script().as_inner().locals_signatures[idx.into_index()]
     }
 
-    fn string_at(&self, idx: StringPoolIndex) -> &str {
-        self.as_script().as_inner().string_pool[idx.into_index()].as_str()
+    fn identifier_at(&self, idx: IdentifierIndex) -> &IdentStr {
+        &self.as_script().as_inner().identifiers[idx.into_index()]
     }
 
     fn byte_array_at(&self, idx: ByteArrayPoolIndex) -> &ByteArray {
@@ -234,8 +263,8 @@ pub trait ScriptAccess: Sync {
         &self.as_script().as_inner().address_pool
     }
 
-    fn string_pool(&self) -> &[String] {
-        &self.as_script().as_inner().string_pool
+    fn identifiers(&self) -> &[Identifier] {
+        &self.as_script().as_inner().identifiers
     }
 
     fn main(&self) -> &FunctionDefinition {
@@ -261,7 +290,7 @@ impl CompiledModuleMut {
         &self,
         field_count: MemberCount,
         first_field: FieldDefinitionIndex,
-    ) -> Option<VMStaticViolation> {
+    ) -> Option<VMStatus> {
         let first_field = first_field.into_index();
         let field_count = field_count as usize;
         // Both first_field and field_count are u16 so this is guaranteed to not overflow.
@@ -269,12 +298,14 @@ impl CompiledModuleMut {
         // [first_field, last_field).
         let last_field = first_field + field_count;
         if last_field > self.field_defs.len() {
-            Some(VMStaticViolation::RangeOutOfBounds(
-                IndexKind::FieldDefinition,
-                self.field_defs.len(),
+            let msg = format!(
+                "Field definition range [{},{}) out of range for {}",
                 first_field,
                 last_field,
-            ))
+                self.field_defs.len()
+            );
+            let status = VMStatus::new(StatusCode::RANGE_OUT_OF_BOUNDS).with_message(msg);
+            Some(status)
         } else {
             None
         }

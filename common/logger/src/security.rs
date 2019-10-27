@@ -1,7 +1,7 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use super::*;
+use super::error;
 use backtrace::Backtrace;
 use rand::{rngs::SmallRng, FromEntropy, Rng};
 use serde::Serialize;
@@ -36,11 +36,17 @@ pub enum SecurityEvent {
     /// Consensus received an invalid new round message
     InvalidConsensusRound,
 
+    /// Consensus received an invalid sync info message
+    InvalidSyncInfoMsg,
+
     /// A block being committed or executed is invalid
     InvalidBlock,
 
     /// Network identified an invalid peer
     InvalidNetworkPeer,
+
+    /// Network discovery received an invalid DiscoveryMsg
+    InvalidDiscoveryMsg,
 
     /// Error for testing
     #[cfg(test)]
@@ -63,7 +69,7 @@ pub enum SecurityEvent {
 ///
 /// # Example:
 /// ```rust
-/// use logger::prelude::*;
+/// use libra_logger::prelude::*;
 /// use std::fmt::Debug;
 ///
 /// #[derive(Debug)]
@@ -148,10 +154,7 @@ impl SecurityLog {
     }
 
     pub(crate) fn to_string(&self) -> String {
-        match serde_json::to_string(&self) {
-            Ok(s) => s,
-            Err(e) => e.to_string(),
-        }
+        serde_json::to_string(&self).unwrap_or_else(|e| e.to_string())
     }
 
     /// Prints the `SecurityEvent` struct.
@@ -189,5 +192,4 @@ mod tests {
             r#"{"event":"TestError","error":"Error","data":["SampleData { i: 255, s: [144, 205, 128] }","\"second_payload\""],"backtrace":null}"#,
         );
     }
-
 }

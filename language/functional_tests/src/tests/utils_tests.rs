@@ -1,4 +1,15 @@
-use crate::utils::parse_input;
+use crate::{
+    config::global::Config as GlobalConfig,
+    errors::*,
+    utils::{build_transactions, split_input},
+};
+
+fn parse_input(input: &str) -> Result<()> {
+    let (config, _, transactions) = split_input(&input)?;
+    let config = GlobalConfig::build(&config)?;
+    build_transactions(&config, &transactions)?;
+    Ok(())
+}
 
 #[test]
 fn parse_input_no_transactions() {
@@ -7,7 +18,7 @@ fn parse_input_no_transactions() {
 
 #[test]
 fn parse_input_no_transactions_with_config() {
-    parse_input("//! no-verify").unwrap_err();
+    parse_input("//! no-run: verifier").unwrap_err();
 }
 
 #[rustfmt::skip]
@@ -23,7 +34,7 @@ fn parse_input_nothing_before_first_empty_transaction() {
 #[test]
 fn parse_input_config_before_first_empty_transaction() {
     parse_input(r"
-        //! no-execute
+        //! no-run: runtime
         //! new-transaction
         main() {}
     ").unwrap_err();
@@ -34,7 +45,7 @@ fn parse_input_config_before_first_empty_transaction() {
 fn parse_input_empty_transaction() {
     parse_input(r"
         main() {}
-        
+
         //! new-transaction
 
         //! new-transaction

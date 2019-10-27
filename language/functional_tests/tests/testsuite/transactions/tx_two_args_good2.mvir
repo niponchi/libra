@@ -2,10 +2,11 @@
 
 //! args: 1, {{default}}
 
-main(val: u64, addr: address) { 
-    assert(copy(val) == 10, 42); 
-    return; 
+main(val: u64, addr: address) {
+    assert(copy(val) == 10, 42);
+    return;
 }
 
-// check: Execution
-// check: AssertionFailure
+// check: Keep
+// check: ABORTED
+// check: 42

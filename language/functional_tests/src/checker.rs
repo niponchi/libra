@@ -3,10 +3,10 @@
 
 use crate::{
     errors::*,
-    evaluator::{EvaluationOutput, EvaluationResult, Stage, Status},
+    evaluator::{EvaluationLog, EvaluationOutput, Stage},
 };
 use filecheck;
-use std::{slice::SliceConcatExt, str::FromStr};
+use std::str::FromStr;
 
 /// A directive specifies a pattern in the output.
 /// Directives are extracted from comments starting with "//".
@@ -34,13 +34,23 @@ impl FromStr for Directive {
             if s.is_empty() {
                 return Err(ErrorKind::Other("stage cannot be empty".to_string()).into());
             }
-            return Ok(Directive::Stage(Stage::parse(s)?));
+            return Ok(Directive::Stage(s.parse::<Stage>()?));
         }
         if s == "transaction" {
             // TODO: implement transaction directive
             unimplemented!();
         }
-        Ok(Directive::Check(s.to_string()))
+        if s.starts_with("check:")
+            || s.starts_with("sameln:")
+            || s.starts_with("nextln:")
+            || s.starts_with("unordered:")
+            || s.starts_with("not:")
+            || s.starts_with("regex:")
+        {
+            Ok(Directive::Check(s.to_string()))
+        } else {
+            Err(ErrorKind::Other("unrecognized directive".to_string()).into())
+        }
     }
 }
 
@@ -57,7 +67,7 @@ pub fn run_filecheck(output: &str, checks: &str) -> Result<bool> {
 }
 
 /// Verifies the directives against the given evaluation result.
-pub fn check(res: &EvaluationResult, directives: &[Directive]) -> Result<()> {
+pub fn check(res: &EvaluationLog, directives: &[Directive]) -> Result<()> {
     let mut checks: Vec<String> = vec![];
     let mut outputs: Vec<String> = vec![];
     let mut did_run_checks = false;
@@ -96,11 +106,15 @@ pub fn check(res: &EvaluationResult, directives: &[Directive]) -> Result<()> {
                             break;
                         }
                     }
-                    EvaluationOutput::Output(s) | EvaluationOutput::Error(s) => {
-                        outputs.push(s.to_string());
+                    EvaluationOutput::Output(output) => {
+                        outputs.push(output.to_check_string());
                         i += 1;
                     }
-                    EvaluationOutput::Transaction => {
+                    EvaluationOutput::Error(e) => {
+                        outputs.push(format!("{:#?}", e));
+                        i += 1;
+                    }
+                    EvaluationOutput::Status(_) | EvaluationOutput::Transaction(_) => {
                         i += 1;
                     }
                 }
@@ -112,19 +126,28 @@ pub fn check(res: &EvaluationResult, directives: &[Directive]) -> Result<()> {
 
     for output in &res.outputs[i..] {
         match output {
-            EvaluationOutput::Output(s) | EvaluationOutput::Error(s) => {
-                outputs.push(s.to_string());
+            EvaluationOutput::Output(output) => {
+                outputs.push(output.to_check_string());
             }
-            EvaluationOutput::Stage(_) | EvaluationOutput::Transaction => {}
+            EvaluationOutput::Error(e) => {
+                outputs.push(format!("{:#?}", e));
+            }
+            EvaluationOutput::Status(_)
+            | EvaluationOutput::Stage(_)
+            | EvaluationOutput::Transaction(_) => {}
         }
     }
     did_run_checks |= run_filecheck(&outputs.join("\n"), &checks.join("\n"))?;
 
-    if res.status == Status::Failure && !did_run_checks {
+    let failed_txns = res.get_failed_transactions();
+    if !failed_txns.is_empty() && !did_run_checks {
         return Err(ErrorKind::Other(format!(
-            "program failed at transaction {}, stage {:?}, no directives found, assuming failure",
-            res.get_transaction_count(),
-            res.get_last_stage().unwrap(),
+            "Failed at {}. Write at least 1 directive to pass this test.",
+            failed_txns
+                .iter()
+                .map(|(idx, stage)| format!("(txn {}, stage {:?})", idx, stage))
+                .collect::<Vec<_>>()
+                .join(", ")
         ))
         .into());
     }

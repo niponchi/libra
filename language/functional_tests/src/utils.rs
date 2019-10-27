@@ -13,30 +13,33 @@ use crate::{
     evaluator::Transaction,
 };
 use regex::{Captures, Regex};
-use std::collections::BTreeMap;
-use vm_runtime_tests::account::AccountData;
 
 /// Substitutes the placeholders (account names in double curly brackets) with addresses.
-pub fn substitute_addresses(accounts: &BTreeMap<String, AccountData>, text: &str) -> String {
+pub fn substitute_addresses(config: &GlobalConfig, text: &str) -> String {
     lazy_static! {
         static ref PAT: Regex = Regex::new(r"\{\{([A-Za-z][A-Za-z0-9]*)\}\}").unwrap();
     }
     PAT.replace_all(text, |caps: &Captures| {
         let name = &caps[1];
-        match accounts.get(name) {
-            Some(data) => format!("0x{}", data.address()),
-            // TODO: find a way to return an error instead of panicking
-            None => panic!(
-                "account '{}' does not exist, cannot substitute address",
-                name
-            ),
-        }
+
+        format!("0x{}", config.get_account_for_name(name).unwrap().address())
     })
     .to_string()
 }
 
+pub struct RawTransactionInput {
+    pub config_entries: Vec<TransactionConfigEntry>,
+    pub text: Vec<String>,
+}
+
 /// Parses the input string into three parts: a global config, directives and transactions.
-pub fn parse_input(s: &str) -> Result<(GlobalConfig, Vec<Directive>, Vec<Transaction>)> {
+pub fn split_input(
+    s: &str,
+) -> Result<(
+    Vec<GlobalConfigEntry>,
+    Vec<Directive>,
+    Vec<RawTransactionInput>,
+)> {
     let mut global_config = vec![];
     let mut directives = vec![];
     let mut text = vec![];
@@ -61,7 +64,10 @@ pub fn parse_input(s: &str) -> Result<(GlobalConfig, Vec<Directive>, Vec<Transac
                 return Err(ErrorKind::Other("empty transaction".to_string()).into());
             }
             first_transaction = false;
-            transactions.push((transaction_config, text));
+            transactions.push(RawTransactionInput {
+                config_entries: transaction_config,
+                text,
+            });
             text = vec![];
             transaction_config = vec![];
             continue;
@@ -94,18 +100,25 @@ pub fn parse_input(s: &str) -> Result<(GlobalConfig, Vec<Directive>, Vec<Transac
         )
         .into());
     }
-    transactions.push((transaction_config, text));
+    transactions.push(RawTransactionInput {
+        config_entries: transaction_config,
+        text,
+    });
 
-    let global_config = GlobalConfig::build(&global_config)?;
-    let transactions = transactions
+    Ok((global_config, directives, transactions))
+}
+
+pub fn build_transactions<'a>(
+    config: &'a GlobalConfig,
+    txn_inputs: &[RawTransactionInput],
+) -> Result<Vec<Transaction<'a>>> {
+    txn_inputs
         .iter()
-        .map(|(config, text)| {
-            let config = TransactionConfig::build(&global_config, &config)?;
+        .map(|txn_input| {
             Ok(Transaction {
-                config,
-                program: substitute_addresses(&global_config.accounts, &text.join("\n")),
+                config: TransactionConfig::build(config, &txn_input.config_entries)?,
+                input: substitute_addresses(config, &txn_input.text.join("\n")),
             })
         })
-        .collect::<Result<Vec<_>>>()?;
-    Ok((global_config, directives, transactions))
+        .collect()
 }

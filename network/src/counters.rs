@@ -2,7 +2,48 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use lazy_static;
-use metrics::{Histogram, IntCounter, IntGauge, OpMetrics};
+use libra_metrics::{Histogram, IntCounter, IntGauge, OpMetrics};
+use prometheus::{IntCounterVec, IntGaugeVec};
+
+lazy_static::lazy_static! {
+    pub static ref LIBRA_NETWORK_PEERS: IntGaugeVec = register_int_gauge_vec!(
+        // metric name
+        "libra_network_peers",
+        // metric description
+        "Libra network peers counter",
+        // metric labels (dimensions)
+        &["role", "state"]
+    ).unwrap();
+
+    pub static ref LIBRA_NETWORK_RPC_MESSAGES: IntCounterVec = register_int_counter_vec!(
+        "libra_network_rpc_messages",
+        "Libra network rpc messages counters",
+        &["type", "state"]
+    ).unwrap();
+
+    pub static ref LIBRA_NETWORK_RPC_BYTES: IntCounterVec = register_int_counter_vec!(
+        "libra_network_rpc_bytes",
+        "Libra network rpc bytes counters",
+        &["type", "state"]
+    ).unwrap();
+
+    pub static ref LIBRA_NETWORK_RPC_LATENCY: Histogram = register_histogram!(
+        "libra_network_rpc_latency_seconds",
+        "Libra network rpc latency histogram"
+    ).unwrap();
+
+    pub static ref LIBRA_NETWORK_DIRECT_SEND_MESSAGES: IntCounterVec = register_int_counter_vec!(
+        "libra_network_direct_send_messages",
+        "Libra network direct send protocol counters, measured by messages",
+        &["state"]
+    ).unwrap();
+
+    pub static ref LIBRA_NETWORK_DIRECT_SEND_BYTES: IntCounterVec = register_int_counter_vec!(
+        "libra_network_direct_send_bytes",
+        "Libra network direct send protocol counters, measured by bytes",
+        &["state"]
+    ).unwrap();
+}
 
 lazy_static::lazy_static! {
     pub static ref OP_COUNTERS: OpMetrics = OpMetrics::new_and_registered("network");
@@ -66,6 +107,12 @@ lazy_static::lazy_static! {
 
     /// Counter of pending network events to Consensus
     pub static ref PENDING_CONSENSUS_NETWORK_EVENTS: IntGauge = OP_COUNTERS.gauge("pending_consensus_network_events");
+
+    /// Counter of pending network events to State Synchronizer
+    pub static ref PENDING_STATE_SYNCHRONIZER_NETWORK_EVENTS: IntGauge = OP_COUNTERS.gauge("pending_state_sync_network_events");
+
+    /// Counter of pending network events to Admission Control
+    pub static ref PENDING_ADMISSION_CONTROL_NETWORK_EVENTS: IntGauge = OP_COUNTERS.gauge("pending_admission_control_network_events");
 
     /// Counter of pending requests in Peer Manager
     pub static ref PENDING_PEER_MANAGER_REQUESTS: IntGauge = OP_COUNTERS.gauge("pending_peer_manager_requests");

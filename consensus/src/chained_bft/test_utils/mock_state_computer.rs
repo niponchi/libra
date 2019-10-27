@@ -2,25 +2,33 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    chained_bft::consensus_types::quorum_cert::QuorumCert,
-    state_replication::{StateComputeResult, StateComputer},
-    state_synchronizer::SyncStatus,
+    chained_bft::test_utils::{mock_storage::MockStorage, TestPayload},
+    state_replication::StateComputer,
 };
-use crypto::{hash::ACCUMULATOR_PLACEHOLDER_HASH, HashValue};
+use consensus_types::block::Block;
+use consensus_types::quorum_cert::QuorumCert;
+use executor::{ExecutedTrees, ProcessedVMOutput};
 use failure::Result;
-use futures::{channel::mpsc, Future, FutureExt};
-use logger::prelude::*;
-use std::pin::Pin;
+use futures::{channel::mpsc, future, Future, FutureExt};
+use libra_logger::prelude::*;
+use libra_types::crypto_proxies::LedgerInfoWithSignatures;
+use std::{pin::Pin, sync::Arc};
 use termion::color::*;
-use types::{ledger_info::LedgerInfoWithSignatures, transaction::TransactionListWithProof};
 
 pub struct MockStateComputer {
     commit_callback: mpsc::UnboundedSender<LedgerInfoWithSignatures>,
+    consensus_db: Arc<MockStorage<TestPayload>>,
 }
 
 impl MockStateComputer {
-    pub fn new(commit_callback: mpsc::UnboundedSender<LedgerInfoWithSignatures>) -> Self {
-        MockStateComputer { commit_callback }
+    pub fn new(
+        commit_callback: mpsc::UnboundedSender<LedgerInfoWithSignatures>,
+        consensus_db: Arc<MockStorage<TestPayload>>,
+    ) -> Self {
+        MockStateComputer {
+            commit_callback,
+            consensus_db,
+        }
     }
 }
 
@@ -28,53 +36,81 @@ impl StateComputer for MockStateComputer {
     type Payload = Vec<usize>;
     fn compute(
         &self,
-        _parent_id: HashValue,
-        _block_id: HashValue,
-        _transactions: &Self::Payload,
-    ) -> Pin<Box<dyn Future<Output = Result<StateComputeResult>> + Send>> {
-        async move {
-            Ok(StateComputeResult {
-                new_state_id: *ACCUMULATOR_PLACEHOLDER_HASH,
-                compute_status: vec![],
-                num_successful_txns: 0,
-                validators: None,
-            })
-        }
-            .boxed()
+        _block: &Block<Self::Payload>,
+        _parent_executed_trees: ExecutedTrees,
+    ) -> Pin<Box<dyn Future<Output = Result<ProcessedVMOutput>> + Send>> {
+        future::ok(ProcessedVMOutput::new(
+            vec![],
+            ExecutedTrees::new_empty(),
+            None,
+        ))
+        .boxed()
     }
 
     fn commit(
         &self,
+        _blocks: Vec<(Self::Payload, Arc<ProcessedVMOutput>)>,
         commit: LedgerInfoWithSignatures,
-    ) -> Pin<Box<Future<Output = Result<()>> + Send>> {
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+        self.consensus_db
+            .commit_to_storage(commit.ledger_info().clone());
+
         self.commit_callback
             .unbounded_send(commit)
             .expect("Fail to notify about commit.");
-        async { Ok(()) }.boxed()
+        future::ok(()).boxed()
     }
 
-    fn sync_to(
-        &self,
-        commit: QuorumCert,
-    ) -> Pin<Box<dyn Future<Output = Result<SyncStatus>> + Send>> {
+    fn sync_to(&self, commit: QuorumCert) -> Pin<Box<dyn Future<Output = Result<bool>> + Send>> {
         debug!(
             "{}Fake sync{} to block id {}",
             Fg(Blue),
             Fg(Reset),
             commit.ledger_info().ledger_info().consensus_block_id()
         );
+        self.consensus_db
+            .commit_to_storage(commit.ledger_info().ledger_info().clone());
         self.commit_callback
             .unbounded_send(commit.ledger_info().clone())
             .expect("Fail to notify about sync");
-        async { Ok(SyncStatus::Finished) }.boxed()
+        async { Ok(true) }.boxed()
     }
 
-    fn get_chunk(
+    fn committed_trees(&self) -> ExecutedTrees {
+        ExecutedTrees::new_empty()
+    }
+}
+
+pub struct EmptyStateComputer;
+
+impl StateComputer for EmptyStateComputer {
+    type Payload = TestPayload;
+    fn compute(
         &self,
-        _: u64,
-        _: u64,
-        _: u64,
-    ) -> Pin<Box<dyn Future<Output = Result<TransactionListWithProof>> + Send>> {
-        async move { Err(format_err!("not implemented")) }.boxed()
+        _block: &Block<Self::Payload>,
+        _parent_executed_trees: ExecutedTrees,
+    ) -> Pin<Box<dyn Future<Output = Result<ProcessedVMOutput>> + Send>> {
+        future::ok(ProcessedVMOutput::new(
+            vec![],
+            ExecutedTrees::new_empty(),
+            None,
+        ))
+        .boxed()
+    }
+
+    fn commit(
+        &self,
+        _blocks: Vec<(Self::Payload, Arc<ProcessedVMOutput>)>,
+        _commit: LedgerInfoWithSignatures,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+        future::ok(()).boxed()
+    }
+
+    fn sync_to(&self, _commit: QuorumCert) -> Pin<Box<dyn Future<Output = Result<bool>> + Send>> {
+        async { Ok(true) }.boxed()
+    }
+
+    fn committed_trees(&self) -> ExecutedTrees {
+        ExecutedTrees::new_empty()
     }
 }

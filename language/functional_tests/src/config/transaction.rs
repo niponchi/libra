@@ -1,10 +1,14 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{config::global::Config as GlobalConfig, errors::*};
-use std::str::FromStr;
-use transaction_builder::transaction_argument::parse_as_transaction_argument;
-use types::transaction::TransactionArgument;
+use crate::{
+    config::{global::Config as GlobalConfig, strip},
+    errors::*,
+    evaluator::Stage,
+};
+use language_e2e_tests::account::Account;
+use libra_types::transaction::{parse_as_transaction_argument, TransactionArgument};
+use std::{collections::BTreeSet, str::FromStr};
 
 /// A partially parsed transaction argument.
 #[derive(Debug)]
@@ -30,47 +34,51 @@ impl FromStr for Argument {
 /// A raw entry extracted from the input. Used to build a transaction config table.
 #[derive(Debug)]
 pub enum Entry {
-    NoVerify,
-    NoExecute,
+    DisableStages(Vec<Stage>),
     Sender(String),
     Arguments(Vec<Argument>),
+    MaxGas(u64),
+    SequenceNumber(u64),
 }
 
 impl FromStr for Entry {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        let s = s.trim_start().trim_end();
-        if !s.starts_with("//!") {
-            return Err(
-                ErrorKind::Other("txn config entry must start with //!".to_string()).into(),
-            );
-        }
-        let s = s[3..].trim_start();
-        match s {
-            "no-verify" => {
-                return Ok(Entry::NoVerify);
-            }
-            "no-execute" => {
-                return Ok(Entry::NoExecute);
-            }
-            _ => {}
-        }
-        if s.starts_with("sender:") {
-            let s = s[7..].trim_start().trim_end();
+        let s = s.split_whitespace().collect::<String>();
+        let s = strip(&s, "//!")
+            .ok_or_else(|| ErrorKind::Other("txn config entry must start with //!".to_string()))?
+            .trim_start();
+
+        if let Some(s) = strip(s, "sender:") {
             if s.is_empty() {
                 return Err(ErrorKind::Other("sender cannot be empty".to_string()).into());
             }
             return Ok(Entry::Sender(s.to_ascii_lowercase()));
         }
-        if s.starts_with("args:") {
-            let res: Result<Vec<_>> = s[5..]
+        if let Some(s) = strip(s, "args:") {
+            let res: Result<Vec<_>> = s
                 .split(',')
-                .map(|s| s.trim_start().trim_end())
+                .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
                 .map(|s| s.parse::<Argument>())
                 .collect();
             return Ok(Entry::Arguments(res?));
+        }
+        if let Some(s) = strip(s, "no-run:") {
+            let res: Result<Vec<_>> = s
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.parse::<Stage>())
+                .collect();
+            return Ok(Entry::DisableStages(res?));
+        }
+        if let Some(s) = strip(s, "max-gas:") {
+            return Ok(Entry::MaxGas(s.parse::<u64>()?));
+        }
+        if let Some(s) = strip(s, "sequence-number:") {
+            return Ok(Entry::SequenceNumber(s.parse::<u64>()?));
         }
         Err(ErrorKind::Other(format!(
             "failed to parse '{}' as transaction config entry",
@@ -102,55 +110,27 @@ impl Entry {
 /// A table of options specific to one transaction, fine tweaking how the transaction
 /// is handled by the testing infra.
 #[derive(Debug)]
-pub struct Config {
-    pub no_verify: bool,
-    pub no_execute: bool,
-    pub sender: String,
+pub struct Config<'a> {
+    pub disabled_stages: BTreeSet<Stage>,
+    pub sender: &'a Account,
     pub args: Vec<TransactionArgument>,
+    pub max_gas: Option<u64>,
+    pub sequence_number: Option<u64>,
 }
 
-impl Config {
+impl<'a> Config<'a> {
     /// Builds a transaction config table from raw entries.
-    pub fn build(config: &GlobalConfig, entries: &[Entry]) -> Result<Self> {
-        let mut no_verify = None;
-        let mut no_execute = None;
+    pub fn build(config: &'a GlobalConfig, entries: &[Entry]) -> Result<Self> {
+        let mut disabled_stages = BTreeSet::new();
         let mut sender = None;
         let mut args = None;
+        let mut max_gas = None;
+        let mut sequence_number = None;
 
         for entry in entries {
             match entry {
-                Entry::NoVerify => match no_verify {
-                    None => {
-                        no_verify = Some(true);
-                    }
-                    _ => {
-                        return Err(
-                            ErrorKind::Other("flag 'no-verify' already set".to_string()).into()
-                        );
-                    }
-                },
-                Entry::NoExecute => match no_execute {
-                    None => {
-                        no_execute = Some(true);
-                    }
-                    _ => {
-                        return Err(
-                            ErrorKind::Other("flag 'no-execute' already set".to_string()).into(),
-                        );
-                    }
-                },
                 Entry::Sender(name) => match sender {
-                    None => {
-                        if config.accounts.contains_key(name) {
-                            sender = Some(name.to_string())
-                        } else {
-                            return Err(ErrorKind::Other(format!(
-                                "account '{}' does not exist",
-                                name
-                            ))
-                            .into());
-                        }
-                    }
+                    None => sender = Some(config.get_account_for_name(name)?),
                     _ => return Err(ErrorKind::Other("sender already set".to_string()).into()),
                 },
                 Entry::Arguments(raw_args) => match args {
@@ -159,16 +139,9 @@ impl Config {
                             raw_args
                                 .iter()
                                 .map(|arg| match arg {
-                                    Argument::AddressOf(name) => match config.accounts.get(name) {
-                                        Some(data) => {
-                                            Ok(TransactionArgument::Address(*data.address()))
-                                        }
-                                        None => Err(ErrorKind::Other(format!(
-                                            "account '{}' does not exist",
-                                            name
-                                        ))
-                                        .into()),
-                                    },
+                                    Argument::AddressOf(name) => Ok(TransactionArgument::Address(
+                                        *config.get_account_for_name(name)?.address(),
+                                    )),
                                     Argument::SelfContained(arg) => Ok(arg.clone()),
                                 })
                                 .collect::<Result<Vec<_>>>()?,
@@ -181,14 +154,47 @@ impl Config {
                         .into())
                     }
                 },
+                Entry::DisableStages(stages) => {
+                    for stage in stages {
+                        if !disabled_stages.insert(*stage) {
+                            return Err(ErrorKind::Other(format!(
+                                "duplicate stage '{:?}' in black list",
+                                stage
+                            ))
+                            .into());
+                        }
+                    }
+                }
+                Entry::MaxGas(n) => match max_gas {
+                    None => max_gas = Some(*n),
+                    Some(_) => {
+                        return Err(
+                            ErrorKind::Other("max gas amount already set".to_string()).into()
+                        )
+                    }
+                },
+                Entry::SequenceNumber(sn) => match sequence_number {
+                    None => sequence_number = Some(*sn),
+                    Some(_) => {
+                        return Err(
+                            ErrorKind::Other("sequence number already set".to_string()).into()
+                        )
+                    }
+                },
             }
         }
 
-        Ok(Config {
-            no_verify: no_verify.unwrap_or(false),
-            no_execute: no_execute.unwrap_or(false),
-            sender: sender.unwrap_or_else(|| "default".to_string()),
+        Ok(Self {
+            disabled_stages,
+            sender: sender.unwrap_or_else(|| config.accounts.get("default").unwrap().account()),
             args: args.unwrap_or_else(|| vec![]),
+            max_gas,
+            sequence_number,
         })
+    }
+
+    #[inline]
+    pub fn is_stage_disabled(&self, stage: Stage) -> bool {
+        self.disabled_stages.contains(&stage)
     }
 }

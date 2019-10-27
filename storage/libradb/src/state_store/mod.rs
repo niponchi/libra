@@ -6,21 +6,25 @@
 #[cfg(test)]
 mod state_store_test;
 
-use crate::schema::{
-    account_state::AccountStateSchema, retired_state_record::RetiredStateRecordSchema,
-    state_merkle_node::StateMerkleNodeSchema,
+use crate::{
+    change_set::ChangeSet,
+    ledger_counters::LedgerCounter,
+    schema::{
+        jellyfish_merkle_node::JellyfishMerkleNodeSchema, stale_node_index::StaleNodeIndexSchema,
+    },
 };
-use crypto::{hash::CryptoHash, HashValue};
 use failure::prelude::*;
-use schemadb::{ReadOptions, SchemaBatch, DB};
-use sparse_merkle::{node_type::Node, RetiredRecordType, SparseMerkleTree, TreeReader};
-use std::{collections::HashMap, sync::Arc};
-use types::{
-    account_address::AccountAddress,
-    account_state_blob::AccountStateBlob,
-    proof::{verify_sparse_merkle_element, SparseMerkleProof},
-    transaction::Version,
+use jellyfish_merkle::{
+    node_type::{LeafNode, Node, NodeKey},
+    JellyfishMerkleTree, TreeReader,
 };
+use libra_crypto::{hash::CryptoHash, HashValue};
+use libra_types::{
+    account_address::AccountAddress, account_state_blob::AccountStateBlob,
+    proof::SparseMerkleProof, transaction::Version,
+};
+use schemadb::DB;
+use std::{collections::HashMap, sync::Arc};
 
 pub(crate) struct StateStore {
     db: Arc<DB>,
@@ -32,17 +36,13 @@ impl StateStore {
     }
 
     /// Get the account state blob given account address and root hash of state Merkle tree
-    pub fn get_account_state_with_proof_by_state_root(
+    pub fn get_account_state_with_proof_by_version(
         &self,
         address: AccountAddress,
-        root_hash: HashValue,
+        version: Version,
     ) -> Result<(Option<AccountStateBlob>, SparseMerkleProof)> {
         let (blob, proof) =
-            SparseMerkleTree::new(self).get_with_proof(address.hash(), root_hash)?;
-        debug_assert!(
-            verify_sparse_merkle_element(root_hash, address.hash(), &blob, &proof).is_ok(),
-            "Invalid proof."
-        );
+            JellyfishMerkleTree::new(self).get_with_proof(address.hash(), version)?;
         Ok((blob, proof))
     }
 
@@ -52,8 +52,7 @@ impl StateStore {
         &self,
         account_state_sets: Vec<HashMap<AccountAddress, AccountStateBlob>>,
         first_version: Version,
-        root_hash: HashValue,
-        batch: &mut SchemaBatch,
+        cs: &mut ChangeSet,
     ) -> Result<Vec<HashValue>> {
         let blob_sets = account_state_sets
             .into_iter()
@@ -66,77 +65,46 @@ impl StateStore {
             .collect::<Vec<_>>();
 
         let (new_root_hash_vec, tree_update_batch) =
-            SparseMerkleTree::new(self).put_blob_sets(blob_sets, first_version, root_hash)?;
-        let (node_batch, blob_batch, retired_record_batch) = tree_update_batch.into();
-        node_batch
+            JellyfishMerkleTree::new(self).put_blob_sets(blob_sets, first_version)?;
+
+        cs.counter_bumps.bump(
+            LedgerCounter::NewStateNodes,
+            tree_update_batch.node_batch.len(),
+        );
+        cs.counter_bumps.bump(
+            LedgerCounter::NewStateLeaves,
+            tree_update_batch.num_new_leaves,
+        );
+        tree_update_batch
+            .node_batch
             .iter()
-            .map(|(node_hash, node)| batch.put::<StateMerkleNodeSchema>(node_hash, node))
+            .map(|(node_key, node)| cs.batch.put::<JellyfishMerkleNodeSchema>(node_key, node))
             .collect::<Result<Vec<()>>>()?;
-        blob_batch
+
+        cs.counter_bumps.bump(
+            LedgerCounter::StaleStateNodes,
+            tree_update_batch.stale_node_index_batch.len(),
+        );
+        cs.counter_bumps.bump(
+            LedgerCounter::StaleStateLeaves,
+            tree_update_batch.num_stale_leaves,
+        );
+        tree_update_batch
+            .stale_node_index_batch
             .iter()
-            .map(|(blob_hash, blob)| batch.put::<AccountStateSchema>(blob_hash, blob))
+            .map(|row| cs.batch.put::<StaleNodeIndexSchema>(row, &()))
             .collect::<Result<Vec<()>>>()?;
-        retired_record_batch
-            .iter()
-            .map(|row| batch.put::<RetiredStateRecordSchema>(row, &()))
-            .collect::<Result<Vec<()>>>()?;
+
         Ok(new_root_hash_vec)
-    }
-
-    /// Purges retired account state blobs and sparse Merkle tree nodes. Yields up to `limit`
-    /// deletions to `batch` while keeps account states readable at `least readable version` and
-    /// beyond.
-    #[allow(dead_code)] // TODO: remove
-    pub fn purge_retired_records(
-        &self,
-        least_readable_version: Version,
-        limit: usize,
-        batch: &mut SchemaBatch,
-    ) -> Result<usize> {
-        let mut num_purged = 0;
-
-        let mut iter = self
-            .db
-            .iter::<RetiredStateRecordSchema>(ReadOptions::default())?;
-        iter.seek_to_first();
-        let mut iter = iter.take(limit);
-
-        while let Some((record, _)) = iter.next().transpose()? {
-            // Only records that have retired before or at version `least_readable_version` can be
-            // pruned in order to keep that version still readable after pruning.
-            if record.version_retired > least_readable_version {
-                break;
-            }
-            match record.record_type {
-                RetiredRecordType::Node => {
-                    batch.delete::<StateMerkleNodeSchema>(&record.hash)?;
-                }
-            }
-            batch.delete::<RetiredStateRecordSchema>(&record)?;
-            num_purged += 1;
-        }
-
-        Ok(num_purged)
     }
 }
 
 impl TreeReader for StateStore {
-    fn get_node(&self, node_hash: HashValue) -> Result<Node> {
-        Ok(self
-            .db
-            .get::<StateMerkleNodeSchema>(&node_hash)?
-            .ok_or_else(|| format_err!("Failed to find node with hash {:?}", node_hash))?)
+    fn get_node_option(&self, node_key: &NodeKey) -> Result<Option<Node>> {
+        Ok(self.db.get::<JellyfishMerkleNodeSchema>(node_key)?)
     }
 
-    fn get_blob(&self, blob_hash: HashValue) -> Result<AccountStateBlob> {
-        Ok(self
-            .db
-            .get::<AccountStateSchema>(&blob_hash)?
-            .ok_or_else(|| {
-                format_err!(
-                    "Failed to find account state blob with hash {:?}",
-                    blob_hash
-                )
-            })?)
+    fn get_rightmost_leaf(&self) -> Result<Option<(NodeKey, LeafNode)>> {
+        unimplemented!();
     }
 }

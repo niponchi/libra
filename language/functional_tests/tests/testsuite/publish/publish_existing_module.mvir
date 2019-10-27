@@ -1,20 +1,8 @@
-modules:
 module Currency {
-}
-
-script:
-main() {
-    return;
 }
 
 //! new-transaction
-modules:
 module Currency {
 }
 
-script:
-main() {
-    return;
-}
-
-// check: DuplicateModuleName
+// check: DUPLICATE_MODULE_NAME

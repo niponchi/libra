@@ -1,19 +1,29 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-#![feature(custom_test_frameworks)]
-#![test_runner(datatest::runner)]
-
-use functional_tests::{checker::check, errors::*, evaluator::eval, utils::parse_input};
+use functional_tests::{
+    checker::check,
+    config::global::Config as GlobalConfig,
+    evaluator::eval,
+    utils::{build_transactions, split_input},
+};
+use std::{fs::read_to_string, path::Path};
 
 // Runs all tests under the test/testsuite directory.
-#[datatest::files("tests/testsuite", { input in r".*\.mvir" })]
-fn functional_tests(input: &str) -> Result<()> {
-    let (config, directives, transactions) = parse_input(input)?;
-    let res = eval(&config, &transactions)?;
-    if let Err(e) = check(&res, &directives) {
-        println!("{:#?}", res);
-        return Err(e);
+fn functional_tests(path: &Path) -> datatest_stable::Result<()> {
+    let input = read_to_string(path)?;
+
+    let (config, directives, transactions) = split_input(&input)?;
+    let config = GlobalConfig::build(&config)?;
+    let transactions = build_transactions(&config, &transactions)?;
+
+    let log = eval(&config, &transactions)?;
+    if let Err(e) = check(&log, &directives) {
+        // TODO: allow the user to select debug/display mode
+        println!("{}", log);
+        return Err(e.into());
     }
     Ok(())
 }
+
+datatest_stable::harness!(functional_tests, "tests/testsuite", r".*\.mvir");
